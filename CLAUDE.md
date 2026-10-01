@@ -24,6 +24,8 @@ pe-analysis/
 │   ├── analyse.py              base class Analyse: file names, slide frame, deck selection
 │   ├── fondskonfig.py          what differs per manager in the portfolio analysis + thresholds
 │   ├── overblik.py             the overview analysis (class Overblik) - investor level + fund level
+│   ├── afkast/                 the return analysis (class Afkast) - investor level only
+│   │                           kerne.py, perioder.py, kilder.py, valuta.py, eksport.py
 │   └── portefoelje/            the portfolio analysis (class Portefoelje) - fund level only
 │       ├── kerne.py            loading, enrichment, aggregates, reconciliation, HAR_* flags
 │       ├── bog.py              latest date: overview, structure, spread/losses/concentration, IRR, vintage
@@ -35,11 +37,12 @@ pe-analysis/
 │   ├── ny_analyse.py           create funds/<fond>/<analyse>/ from a template
 │   ├── koer.py                 execute an analysis' notebooks for one or all funds
 │   └── byg_skabeloner.py       regenerate templates/*.ipynb (templates are kept as code)
-├── templates/                  overblik.ipynb, portefoelje.ipynb, analyse.ipynb
+├── templates/                  overblik.ipynb, portefoelje.ipynb, afkast.ipynb, analyse.ipynb
 │                               (placeholders __FUND_CODE__, __ANALYSE__)
 └── funds/
     └── <fund_code lower>/      nep5, nep6, pscp4, pscp5, mif3, atppep9, catacap3, seed4, cap3, cap4
-        └── <analyse>/          overblik (all funds), portefoelje (funds with holdings values)
+        └── <analyse>/          overblik (all funds), portefoelje (funds with holdings values),
+                                afkast (funds we are invested in)
             ├── <analyse>.ipynb
             ├── charts/         <fond>_<analyse>_*.png
             └── exports/        <fond>_<analyse>_<ddmmyyyy>.{xlsx,pptx}
@@ -52,6 +55,7 @@ pip install -e .                                  # once; makes `import pe_analy
 python scripts/koer.py overblik                   # run the overview for every fund
 python scripts/koer.py overblik NEP5 PSCP4        # or for selected funds
 python scripts/koer.py portefoelje                # run the portfolio analysis for every fund that has it
+python scripts/koer.py afkast                     # run the return analysis for every fund we are invested in
 python scripts/ny_analyse.py PSCP4 watchlist      # new analysis folder from templates/analyse.ipynb
 python scripts/ny_analyse.py alle overblik        # overview folder for funds added to the database
 python scripts/ny_analyse.py alle portefoelje     # ... only for funds the analysis has data for
@@ -78,6 +82,8 @@ One function per view, filtered on `fund_code`: `fonde()`, `fond(code)`, `cash_f
 
 - `xirr(stroemme)`: actual/365 bisection; NaN without a sign change.
 - `kvartalsserie(cf, nav, nav_kolonne)`: one row per NAV date with cumulative `indbetalt`, `udloddet`, `nav`, `dpi`/`rvpi`/`tvpi`, `irr`, `mervaerdi`, `nettovaerdi`, `resttilsagn`. `EQUALISATION` is left out of paid-in/distributions, `WITHHOLDING_TAX` out of DPI and XIRR. IRR is NaN until `MIN_IRR_DAGE` (365) days after the first cash flow.
+- `periodeserie(serie, cf)`: one row per statement period with value creation, Modified Dietz return (real value dates), chained index and 12-month figures.
+- `kilder_serie(ca, cf, datoer)`: the capital account's movements cumulative since inception per statement date, per account, plus `RESTAT` and `HUL` (see the return analysis).
 - `nav_bro(ca, dato)`: opening NAV + capital-account movements = closing NAV. Uses the statement's own ITD if it has one; otherwise chains the YTD statements year by year (only if every year-end exists and the first year opens at 0), with the gap between one year's closing and the next year's opening as its own line `RESTAT` (the GP's year-end restatement); otherwise YTD only. `rest` is what the GP's lines don't explain.
 
 ### `style.py` and `deck.py`
@@ -148,6 +154,36 @@ Things the code handles on purpose:
 - **PSCP tranche detail starts 30.09.2024** (`DETALJE_FRA`). Earlier dates have one line per company, so instrument/currency history starts there; totals go back to the first report.
 - **Labels in sentences** use `lille()` so acronyms survive ("PIK / junior gæld", "CSOV"). `dmoney()` drops the unit for currencies without a symbol ("+12,3", axis says mio. DKK) unless `enhed=True`.
 - PSCP4 at 30.06.2026 reproduces the original deck: TVPI 1,40x, 48 companies / 105 lines / 86 positions, realised book 1,45x, loss rate 0,9 % (all in equity), top 5 = 38 % of gain, quarter +€38,6m (+2,07 %), YTD +€74,7m (+4,03 %). Use these as a regression check after touching the loader or the normaliser.
+
+## The return analysis (`afkast`)
+
+`pe_analysis/afkast/`, class `Afkast(fund_code, as_of=None, nav_kolonne="restated_nav")`. What has our investment returned per period, where does the result come from, what does the management cost, and what is the return in DKK. **Investor level only** (our cash flows, our NAV, our capital account; net). Runs for the eight funds with investor data; CAP3/CAP4 have none (`afkast.har_data()` is False).
+
+Parts: `kerne.py` (loading, series, `HAR_*` flags, reconciliation), `perioder.py`, `kilder.py`, `valuta.py`, `eksport.py` (`SLIDES`, tables, Excel, deck text). Five deck sections: periodeafkast · afkastets kilder og omkostninger · kapitalens anvendelse · valuta · tabeller.
+
+| Method | Slide | Needs |
+|---|---|---|
+| `graf_noegletal` | cards: latest quarter, 12 months, IRR, net result, gross result, costs, currency effect | – |
+| `graf_kvartalsafkast` | value creation per statement period, Modified Dietz % as label | 2 statements |
+| `graf_rullende` | rolling 12 months: value creation and return | more than a year |
+| `graf_horisont` | IRR over 1, 3, 5 years and since inception (opening NAV as an outflow) | more than a year |
+| `graf_kilder_tid`, `graf_kilder_aar` | the capital account's result lines, cumulative per date and per calendar year | `HAR_KILDER` |
+| `graf_brutto_netto` | waterfall gross result → fee → expenses → financial items → carry → net | `HAR_KILDER` |
+| `graf_omkostninger` | costs per year; fee in % of commitment and running costs in % of average NAV | `HAR_HONORAR` |
+| `graf_formaal` | calls by purpose and distributions by type (from the notices) | `HAR_CF_SPLIT` |
+| `graf_tilsagn` | commitment drawn / unfunded over time against NAV | – |
+| `graf_valutabro`, `graf_valuta_tid` | DKK value = paid-in + return in fund currency + FX effect; TVPI in both currencies, rate at each call | `HAR_VALUTA` |
+| `tabel_perioder`, `tabel_kilder`, `tabel_omkostninger` | tables | as the charts |
+
+Things the code handles on purpose:
+
+- **Value creation is the change in `nettovaerdi`** (NAV + cumulative net cash), so periods sum to the total (asserted). **Modified Dietz uses the real value dates** as weights (unlike `portefoelje`, which has no dated flows). The percentage is only shown once the capital at work exceeds `MIN_KAPITAL` (5 %) of the commitment; before that it is a large percentage of a small amount (NEP6's first period is +615 %). There is deliberately **no since-inception time-weighted index**: those early periods would dominate it.
+- **`metrics.kilder_serie`** builds the capital account cumulatively per date: the statement's own ITD, else YTD on top of an earlier date. NEP opens Q1 at the year-end NAV as first reported and Q2 onwards at the restated one, so the change in opening within a year is booked as `RESTAT`. A missing year-end (CATACAP3 H2 2023) becomes `HUL`: ΔNAV minus the cash flows in the gap.
+- **Restatements are folded into the line the GP books them in** (`urealiseret` if the statement has CA310, else `resultat`), because they sit inside the GP's own lines in Q1 and as a changed opening from Q2; kept separate, the category would flicker.
+- **`HAR_HONORAR` requires CA210 in the latest statement.** If the GP stopped splitting the result (NEP6 from 2025-12, `SAMLET`), the whole history is shown unsplit rather than split up to a date. `CA290` means different things per GP (everything for NEP, operating costs for CataCap, investment result for ATP) and is always labelled "Resultat, ikke opdelt".
+- **Costs in % p.a. need `MIN_AAR_OMK` (2) years**: the first statement often carries fees from before our entry (MIF3, ATP). % of NAV is hidden for years where average NAV is under `MIN_NAV_ANDEL` of its peak.
+- **Reconciliation**: periods = net value; capital-account lines = NAV (within `BRO_TOLERANCE`); FX bridge = DKK value. The capital account's net result is compared with the merværdi of our cash flows; over 1 % of paid-in becomes the first forbehold (SEED4, missing draw downs).
+- Regression: PSCP4 at 30.06.2026 – net result €6.072.056 = merværdi, gross €8,93m, fee €1,08m, expenses €0,28m, financial items €1,49m, 12-month return +8,1 %, IRR 10,7 %. NEP5 net result $29.525.608.
 
 ## Conventions
 

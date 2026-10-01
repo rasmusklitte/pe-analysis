@@ -78,6 +78,112 @@ def manglende_kvartaler(datoer):
     return [d for d in alle if d not in datoer]
 
 
+def periodeserie(serie, cf):
+    """Én række pr. opgørelsesperiode: værdiskabelse og Modified Dietz-afkast.
+
+    serie er kvartalsserie(), cf de samme pengestrømme. Værdiskabelsen er ændringen i
+    nettoværdi (NAV + akkumuleret nettopengestrøm), så perioderne summerer til totalen.
+    Afkastet er værdiskabelsen over primo-NAV plus periodens nettoindbetalinger, vægtet med
+    den del af perioden de har været inde (faktiske valørdatoer). Første periode løber fra
+    første pengestrøm med primo-NAV 0. `indeks` kæder afkastene (start = 100), og
+    `afkast_12m` er indeksets ændring over præcis ét år, hvor den opgørelse findes.
+    """
+    stroem = cf[cf["flow_class"] != "WITHHOLDING_TAX"].groupby("value_date")["amount"].sum()
+    start = cf["value_date"].min()
+    raekker, t0, nav0, nv0 = [], None, 0.0, 0.0
+    for dato, r in serie.iterrows():
+        fra = start if t0 is None else t0
+        s = stroem[(stroem.index <= dato) & ((stroem.index > t0) if t0 is not None else True)]
+        dage = max((dato - fra).days, 1)
+        vaegt = np.array([(dato - d).days / dage for d in s.index])
+        kapital = nav0 - float((s.values * vaegt).sum())
+        skabt = r["nettovaerdi"] - nv0
+        raekker.append(dict(
+            period_end=dato, start=fra, dage=dage, nav_primo=nav0, nav_ultimo=r["nav"],
+            netto_indbetalt=-float(s.sum()), vaerdiskabelse=skabt, kapital=kapital,
+            afkast=skabt / kapital if kapital > 0 else np.nan))
+        t0, nav0, nv0 = dato, r["nav"], r["nettovaerdi"]
+    p = pd.DataFrame(raekker).set_index("period_end")
+    p["indeks"] = 100 * (1 + p["afkast"].fillna(0)).cumprod()
+    p["nettovaerdi"] = p["vaerdiskabelse"].cumsum()
+    idx0 = pd.concat([pd.Series({start: 100.0}), p["indeks"]])
+    idx0 = idx0[~idx0.index.duplicated(keep="last")]
+    nv = pd.concat([pd.Series({start: 0.0}), p["nettovaerdi"]])
+    nv = nv[~nv.index.duplicated(keep="last")]
+    for dato in p.index:
+        foer = dato - pd.DateOffset(years=1) + pd.offsets.MonthEnd(0)
+        if foer in p.index:
+            p.loc[dato, "afkast_12m"] = p.loc[dato, "indeks"] / idx0[foer] - 1
+            p.loc[dato, "vaerdiskabelse_12m"] = p.loc[dato, "nettovaerdi"] - nv[foer]
+    if "afkast_12m" not in p:
+        p["afkast_12m"], p["vaerdiskabelse_12m"] = np.nan, np.nan
+    return p
+
+
+def kilder_serie(ca, cf, datoer):
+    """Kapitalkontoens bevægelser akkumuleret siden start, én række pr. opgørelsesdato.
+
+    Kolonnerne er kontokoderne (CA110, CA210 ...) plus RESTAT (GP'ens efterregulering af et
+    årsultimo) og HUL (resultat i perioder uden opgørelse). Pr. dato bruges opgørelsens egen
+    ITD; ellers YTD lagt oven på en tidligere dato: samme års YTD-forskel, forrige årsultimo
+    plus efterregulering, eller - hvis årsultimoet mangler - den seneste kendte dato, hvor
+    pengestrømmene i hullet trækkes ud, så kun resultatet står i HUL. Rækkerne summerer til
+    NAV som rapporteret; en efterregulering ses først i RESTAT, når GP'en ændrer årets primo
+    (typisk fra Q2), og ligger i Q1 i opgørelsens egne linjer.
+
+    Returnerer (akkumuleret DataFrame, ultimo-NAV som rapporteret pr. dato).
+    """
+    d = ca[(ca["account_group"] == "CAPACC") & (ca["basis"] != "POINT")]
+
+    def hent(dato, basis):
+        x = d[(d["period_end"] == dato) & (d["basis"] == basis)]
+        return _bro_paa_dato(d, dato, basis) if (x["account_code"] == "CA900").any() else None
+
+    def plus(k, kode, v):
+        k[kode] = k.get(kode, 0.0) + v
+
+    kum, ultimo = {}, {}
+    for dato in sorted(pd.DatetimeIndex(datoer)):
+        itd, ytd = hent(dato, "ITD"), hent(dato, "YTD")
+        if itd is not None:
+            primo, ult, bev = itd
+            k = bev.copy()
+            if abs(primo) > 0.5:
+                plus(k, "HUL", primo)
+        elif ytd is not None:
+            primo, ult, bev = ytd
+            aarsskifte = pd.Timestamp(year=dato.year - 1, month=12, day=31)
+            samme = [e for e in kum if e.year == dato.year and hent(e, "YTD") is not None]
+            if samme:
+                e = max(samme)
+                primo_e, _, bev_e = hent(e, "YTD")
+                k = kum[e].add(bev, fill_value=0).sub(bev_e, fill_value=0)
+                # Q1 åbner i den først rapporterede årsultimo, Q2 i den efterregulerede
+                plus(k, "RESTAT", primo - primo_e)
+            elif aarsskifte in kum:
+                k = kum[aarsskifte].add(bev, fill_value=0)
+                plus(k, "RESTAT", primo - ultimo[aarsskifte])
+            else:
+                e = max(kum) if kum else None
+                k = kum[e].add(bev, fill_value=0) if e is not None else bev.copy()
+                g = cf[(cf["value_date"] <= aarsskifte)
+                       & ((cf["value_date"] > e) if e is not None else True)]
+                ind = -g.loc[g["flow_class"] == "CONTRIBUTION", "amount"].sum()
+                udl = -g.loc[g["flow_class"] == "DISTRIBUTION", "amount"].sum()
+                plus(k, "CA110", ind)
+                plus(k, "CA120", udl)
+                plus(k, "HUL", primo - (ultimo[e] if e is not None else 0.0) - ind - udl)
+        else:
+            continue
+        kum[dato], ultimo[dato] = k, ult
+    if not kum:
+        return pd.DataFrame(), pd.Series(dtype=float)
+    df = pd.DataFrame(kum).T.fillna(0.0)
+    df = df.loc[:, df.abs().max() > 0.5]
+    df.index.name = "period_end"
+    return df, pd.Series(ultimo)
+
+
 def _bro_paa_dato(d, dato, basis):
     d = d[(d["period_end"] == dato) & (d["basis"] == basis)]
     bev = d[d["in_nav_rollforward"]].groupby("account_code")["amount"].sum()

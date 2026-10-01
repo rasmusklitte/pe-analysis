@@ -19,4 +19,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["pe_analysis", "pe_analysis.portefoelje"]
+packages = ["pe_analysis", "pe_analysis.portefoelje", "pe_analysis.afkast"]

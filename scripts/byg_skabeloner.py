@@ -1,4 +1,4 @@
-"""Skriv notebook-skabelonerne i templates/ (overblik.ipynb og analyse.ipynb).
+"""Skriv notebook-skabelonerne i templates/ (overblik, portefoelje, afkast og analyse).
 
 Skabelonerne vedligeholdes her som kode, fordi en .ipynb er besværlig at rette i hånden.
 Kør scriptet efter en ændring; eksisterende notebooks i funds/ røres ikke.
@@ -188,7 +188,57 @@ dimension skal summere til rapportens totaler, og positionerne til fondens egen 
     return celler
 
 
+AF_TEKST = {
+    "Periodeafkast": "Hvad har investeringen givet pr. kvartal, over 12 måneder og pr. horisont? "
+                     "Værdiskabelse er ændringen i NAV plus udlodninger minus indbetalinger; "
+                     "procenten er Modified Dietz på de faktiske valørdatoer.",
+    "Afkastets kilder og omkostninger": "Kapitalkontoens linjer lagt sammen siden start: hvad er "
+                                        "indtægt, realiseret og urealiseret, og hvor meget af "
+                                        "bruttoresultatet går til honorar, omkostninger og carry?",
+    "Kapitalens anvendelse": "Hvad er indkaldene gået til, hvad består udlodningerne af, og hvor "
+                             "meget af tilsagnet står tilbage?",
+    "Valuta": "Afkastet i DKK delt i fondens afkast og valutaens bidrag. Kun fonde i anden valuta.",
+    "Tabeller": "De samme tal som graferne, men til at læse i.",
+}
+
+
+def afkast_celler():
+    from pe_analysis.afkast.eksport import SLIDES     # én liste styrer både deck og notebook
+    celler = [
+        md("""# __FUND_CODE__ – afkastanalyse
+
+Hvad har vores investering givet pr. periode, hvor kommer resultatet fra, hvad koster
+forvaltningen, og hvad er afkastet i DKK? Analysen er **investorniveau**: vores pengestrømme, vores
+NAV og vores kapitalkonto, efter honorar og carry.
+
+Al logik ligger i `pe_analysis/afkast/`; notebooken vælger fonden og kalder én metode pr. slide.
+Hver metode gemmer en PNG i `charts/`, og de sidste celler skriver Excel og PowerPoint til
+`exports/`.
+
+> Hvilke slides der tegnes, afgøres af fondens data. En metode, der mangler det, den skal bruge
+> (honorar udskilt i kapitalkontoen, indkald opdelt efter formål, anden valuta end DKK ...), skriver
+> hvorfor og springer over."""),
+        code("from pe_analysis.afkast import Afkast"),
+        md("## Konfiguration"),
+        code('''FUND_CODE   = "__FUND_CODE__"
+AS_OF       = None             # None = seneste NAV-dato; ellers fx "2025-12-31"
+NAV_KOLONNE = "restated_nav"   # reviderede årsultimoer; "nav" = som først rapporteret'''),
+        md("""## Indlæsning og afstemning
+
+Perioderne skal summere til nettoresultatet, kapitalkontoens linjer til NAV, og valutabroens led
+til værdien i DKK, før noget tegnes."""),
+        code("af = Afkast(FUND_CODE, as_of=AS_OF, nav_kolonne=NAV_KOLONNE)"),
+    ]
+    for nr, (titel, metoder) in enumerate(SLIDES, 1):
+        celler.append(md(f"# {nr}. {titel}\n\n{AF_TEKST[titel]}"))
+        celler += [code(f"af.{m}()") for m in metoder]
+    celler += [md("# Eksport\n\nExcel med alle tabellerne bag graferne, og ét deck på PPIM-masteren."),
+               code("af.excel()"), code("af.deck()")]
+    return celler
+
+
 if __name__ == "__main__":
+    gem(afkast_celler(), "afkast.ipynb")
     gem(OVERBLIK, "overblik.ipynb")
     gem(ANALYSE, "analyse.ipynb")
     gem(portefoelje_celler(), "portefoelje.ipynb")
