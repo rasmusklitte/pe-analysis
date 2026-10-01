@@ -1,0 +1,9 @@
+__pycache__/
+.ipynb_checkpoints/
+*.egg-info/
+.env
+~$*
+
+# genererede Excel- og PowerPoint-filer; gendannes med scripts/koer.py
+funds/*/*/exports/
+funds/*/*/charts/
